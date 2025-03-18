@@ -1,0 +1,19 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        
+        {
+            "name": "train",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "/home/liyue7/data/Code/multi_contrast_inr/main.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": ["--config", "/home/liyue7/data/Code/multi_contrast_inr/config/config_brats_mlpv2.yaml",
+        "--logging", ]
+        }
+    ]
+}

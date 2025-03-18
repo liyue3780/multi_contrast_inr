@@ -96,11 +96,11 @@ def main(args):
     # logging run
     if args.logging:
         wandb.login()
-        wandb.init(config=config_dict, project=config.SETTINGS.PROJECT_NAME)
+        wandb.init(config=config_dict, project=config.SETTINGS.PROJECT_NAME, dir="/home/liyue7/data/Data/D17_T1T2_ASHS/upsample_network/inr_upsampling/log")
 
     # make directory for models
-    weight_dir = f'runs/{config.SETTINGS.PROJECT_NAME}_weights'
-    image_dir = f'runs/{config.SETTINGS.PROJECT_NAME}_images'
+    weight_dir = f'/home/liyue7/data/Data/D17_T1T2_ASHS/upsample_network/inr_upsampling/runs/{config.SETTINGS.PROJECT_NAME}_weights'
+    image_dir = f'/home/liyue7/data/Data/D17_T1T2_ASHS/upsample_network/inr_upsampling/runs/{config.SETTINGS.PROJECT_NAME}_images'
 
     pathlib.Path(weight_dir).mkdir(parents=True, exist_ok=True)
     pathlib.Path(image_dir).mkdir(parents=True, exist_ok=True)
