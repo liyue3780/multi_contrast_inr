@@ -470,105 +470,120 @@ def main(args):
             model_intensities_contrast2= scaler.fit_transform(label_arr.reshape(-1, 1))
 
             inference_time = time.time() - start
-            if args.logging:
-                wandb_epoch_dict.update({'inference_time': inference_time})
 
             print("Generating NIFTIs.")
             img_contrast1 = model_intensities_contrast1.reshape((x_dim, y_dim, z_dim))#.cpu().numpy()
             img_contrast2 = model_intensities_contrast2.reshape((x_dim, y_dim, z_dim))#.cpu().numpy()
 
-            gt_contrast1 = dataset.get_contrast1_gt().reshape((x_dim, y_dim, z_dim)).cpu().numpy()
-            gt_contrast2 = dataset.get_contrast2_gt().reshape((x_dim, y_dim, z_dim)).cpu().numpy()
+            # gt_contrast1 = dataset.get_contrast1_gt().reshape((x_dim, y_dim, z_dim)).cpu().numpy()
+            # gt_contrast2 = dataset.get_contrast2_gt().reshape((x_dim, y_dim, z_dim)).cpu().numpy()
 
-            label_arr = np.array(gt_contrast1, dtype=np.float32)
-            gt_contrast1= scaler.fit_transform(gt_contrast1.reshape(-1, 1)).reshape((x_dim, y_dim, z_dim))
+            # label_arr = np.array(gt_contrast1, dtype=np.float32)
+            # gt_contrast1= scaler.fit_transform(gt_contrast1.reshape(-1, 1)).reshape((x_dim, y_dim, z_dim))
 
-            label_arr = np.array(gt_contrast2, dtype=np.float32)
-            gt_contrast2= scaler.fit_transform(gt_contrast2.reshape(-1, 1)).reshape((x_dim, y_dim, z_dim))
+            # label_arr = np.array(gt_contrast2, dtype=np.float32)
+            # gt_contrast2= scaler.fit_transform(gt_contrast2.reshape(-1, 1)).reshape((x_dim, y_dim, z_dim))
 
-            pred_contrast1 = img_contrast1
-            pred_contrast2 = img_contrast2
+            # pred_contrast1 = img_contrast1
+            # pred_contrast2 = img_contrast2
             affine = np.array(mgrid_affine)
 
-            # to debug if we are comparing the right contrasts
-            # nib.save(nib.Nifti1Image(pred_contrast1, affine), "pred_contrast1.nii.gz")
-            # nib.save(nib.Nifti1Image(pred_contrast2, affine), "pred_contrast2.nii.gz")
-            # nib.save(nib.Nifti1Image(gt_contrast1, affine), "gt_contrast1.nii.gz")
-            # nib.save(nib.Nifti1Image(gt_contrast2, affine), "gt_contrast2.nii.gz")
+            # # to debug if we are comparing the right contrasts
+            # # nib.save(nib.Nifti1Image(pred_contrast1, affine), "pred_contrast1.nii.gz")
+            # # nib.save(nib.Nifti1Image(pred_contrast2, affine), "pred_contrast2.nii.gz")
+            # # nib.save(nib.Nifti1Image(gt_contrast1, affine), "gt_contrast1.nii.gz")
+            # # nib.save(nib.Nifti1Image(gt_contrast2, affine), "gt_contrast2.nii.gz")
 
-            metrics_contrast1 = compute_metrics(gt=gt_contrast1.copy(), pred=pred_contrast1.copy(), mask=dataset.get_contrast1_gt_mask(), lpips_loss=lpips_loss, device=device)
-            metrics_contrast2 = compute_metrics(gt=gt_contrast2.copy(), pred=pred_contrast2.copy(), mask=dataset.get_contrast2_gt_mask(), lpips_loss=lpips_loss, device=device)
+            # metrics_contrast1 = compute_metrics(gt=gt_contrast1.copy(), pred=pred_contrast1.copy(), mask=dataset.get_contrast1_gt_mask(), lpips_loss=lpips_loss, device=device)
+            # metrics_contrast2 = compute_metrics(gt=gt_contrast2.copy(), pred=pred_contrast2.copy(), mask=dataset.get_contrast2_gt_mask(), lpips_loss=lpips_loss, device=device)
             
-            metrics_mi_true = compute_mi_hist(gt_contrast1.copy(), gt_contrast2.copy(), dataset.get_contrast2_gt_mask(), bins=32)
-            metrics_mi_1 = compute_mi_hist(pred_contrast1.copy(), gt_contrast2.copy(), dataset.get_contrast2_gt_mask(), bins=32)
-            metrics_mi_2 = compute_mi_hist(pred_contrast2.copy(), gt_contrast1.copy(), dataset.get_contrast2_gt_mask(), bins=32)
-            metrics_mi_pred = compute_mi_hist(pred_contrast1.copy(), pred_contrast2.copy(), dataset.get_contrast2_gt_mask(), bins=32)
+            # metrics_mi_true = compute_mi_hist(gt_contrast1.copy(), gt_contrast2.copy(), dataset.get_contrast2_gt_mask(), bins=32)
+            # metrics_mi_1 = compute_mi_hist(pred_contrast1.copy(), gt_contrast2.copy(), dataset.get_contrast2_gt_mask(), bins=32)
+            # metrics_mi_2 = compute_mi_hist(pred_contrast2.copy(), gt_contrast1.copy(), dataset.get_contrast2_gt_mask(), bins=32)
+            # metrics_mi_pred = compute_mi_hist(pred_contrast1.copy(), pred_contrast2.copy(), dataset.get_contrast2_gt_mask(), bins=32)
                    
-            metrics_mi_approx = compute_mi(pred_contrast1.copy(), pred_contrast2.copy(), dataset.get_contrast2_gt_mask(),device)
+            # metrics_mi_approx = compute_mi(pred_contrast1.copy(), pred_contrast2.copy(), dataset.get_contrast2_gt_mask(),device)
             
-            if args.logging:
-                wandb_epoch_dict.update({f'contrast1_ssim': metrics_contrast1["ssim"]})
-                wandb_epoch_dict.update({f'contrast1_psnr': metrics_contrast1["psnr"]})
-                wandb_epoch_dict.update({f'contrast1_lpips': metrics_contrast1["lpips"]})
-                wandb_epoch_dict.update({f'contrast2_ssim': metrics_contrast2["ssim"]})
-                wandb_epoch_dict.update({f'contrast2_psnr': metrics_contrast2["psnr"]})
-                wandb_epoch_dict.update({f'contrast2_lpips': metrics_contrast2["lpips"]})
-                wandb_epoch_dict.update({f'mutual_information': metrics_mi_pred["mi"]})
-                wandb_epoch_dict.update({f'mutual_information_appox': metrics_mi_approx["mi"]})
-                wandb_epoch_dict.update({f'MI_error_contrast1': np.abs(metrics_mi_1["mi"]-metrics_mi_true["mi"])})
-                wandb_epoch_dict.update({f'MI_error_contrast2': np.abs(metrics_mi_2["mi"]-metrics_mi_true["mi"])})
-                wandb_epoch_dict.update({f'MI_error_pred': np.abs(metrics_mi_pred["mi"]-metrics_mi_true["mi"])})
+            # if args.logging:
+            #     wandb_epoch_dict.update({f'contrast1_ssim': metrics_contrast1["ssim"]})
+            #     wandb_epoch_dict.update({f'contrast1_psnr': metrics_contrast1["psnr"]})
+            #     wandb_epoch_dict.update({f'contrast1_lpips': metrics_contrast1["lpips"]})
+            #     wandb_epoch_dict.update({f'contrast2_ssim': metrics_contrast2["ssim"]})
+            #     wandb_epoch_dict.update({f'contrast2_psnr': metrics_contrast2["psnr"]})
+            #     wandb_epoch_dict.update({f'contrast2_lpips': metrics_contrast2["lpips"]})
+            #     wandb_epoch_dict.update({f'mutual_information': metrics_mi_pred["mi"]})
+            #     wandb_epoch_dict.update({f'mutual_information_appox': metrics_mi_approx["mi"]})
+            #     wandb_epoch_dict.update({f'MI_error_contrast1': np.abs(metrics_mi_1["mi"]-metrics_mi_true["mi"])})
+            #     wandb_epoch_dict.update({f'MI_error_contrast2': np.abs(metrics_mi_2["mi"]-metrics_mi_true["mi"])})
+            #     wandb_epoch_dict.update({f'MI_error_pred': np.abs(metrics_mi_pred["mi"]-metrics_mi_true["mi"])})
 
 
             img = nib.Nifti1Image(img_contrast1, affine)
+            if (epoch + 1) % 10 == 0:
+                nib.save(img, os.path.join(subject_specific_model_save_path, model_name_epoch.replace("model.pt", f"_ct1.nii.gz")))
 
-            # only store the last checkpoint
-            if epoch == (config.TRAINING.EPOCHS -1):
-                nib.save(img, os.path.join(image_dir, model_name_epoch.replace("model.pt", f"_ct1.nii.gz")))
-
-            slice_0 = img_contrast1[int(x_dim/2), :, :]
-            slice_1 = img_contrast1[:, int(y_dim/2), :]
-            slice_2 = img_contrast1[:, :, int(z_dim/2)]
+            # slice_0 = img_contrast1[int(x_dim/2), :, :]
+            # slice_1 = img_contrast1[:, int(y_dim/2), :]
+            # slice_2 = img_contrast1[:, :, int(z_dim/2)]
 
             img = nib.Nifti1Image(img_contrast2, affine)
-            if epoch == (config.TRAINING.EPOCHS -1):
-                nib.save(img, os.path.join(image_dir, model_name_epoch.replace("model.pt", f"_ct2.nii.gz")))
+            if (epoch + 1) % 10 == 0:
+                nib.save(img, os.path.join(subject_specific_model_save_path, model_name_epoch.replace("model.pt", f"_ct2.nii.gz")))
 
-            bslice_0 = gt_contrast1[int(x_dim/2), :, :]
-            bslice_1 = gt_contrast1[:, int(y_dim/2), :]
-            bslice_2 = gt_contrast1[:, :, int(z_dim/2)]
+            # bslice_0 = gt_contrast1[int(x_dim/2), :, :]
+            # bslice_1 = gt_contrast1[:, int(y_dim/2), :]
+            # bslice_2 = gt_contrast1[:, :, int(z_dim/2)]
 
-            im = show_slices_gt([slice_0, slice_1, slice_2],[bslice_0, bslice_1, bslice_2], epoch)
-            if args.logging:
-                image = wandb.Image(im, caption=f"{config.DATASET.LR_CONTRAST1} prediction vs gt.")
-                wandb_epoch_dict.update({f"{config.DATASET.LR_CONTRAST1}": image})
+            # im = show_slices_gt([slice_0, slice_1, slice_2],[bslice_0, bslice_1, bslice_2], epoch)
+            # if args.logging:
+            #     image = wandb.Image(im, caption=f"{config.DATASET.LR_CONTRAST1} prediction vs gt.")
+            #     wandb_epoch_dict.update({f"{config.DATASET.LR_CONTRAST1}": image})
 
-            slice_0 = img_contrast2[int(x_dim/2), :, :]
-            slice_1 = img_contrast2[:, int(y_dim/2), :]
-            slice_2 = img_contrast2[:, :, int(z_dim/2)]
+            # slice_0 = img_contrast2[int(x_dim/2), :, :]
+            # slice_1 = img_contrast2[:, int(y_dim/2), :]
+            # slice_2 = img_contrast2[:, :, int(z_dim/2)]
 
-            bslice_0 = gt_contrast2[int(x_dim/2), :, :]
-            bslice_1 = gt_contrast2[:, int(y_dim/2), :]
-            bslice_2 = gt_contrast2[:, :, int(z_dim/2)]
+            # bslice_0 = gt_contrast2[int(x_dim/2), :, :]
+            # bslice_1 = gt_contrast2[:, int(y_dim/2), :]
+            # bslice_2 = gt_contrast2[:, :, int(z_dim/2)]
 
-            im = show_slices_gt([slice_0, slice_1, slice_2],[bslice_0, bslice_1, bslice_2], epoch)
-            if args.logging:
-                image = wandb.Image(im, caption=f"{config.DATASET.LR_CONTRAST2} prediction vs gt.")
-                wandb_epoch_dict.update({f"{config.DATASET.LR_CONTRAST2}": image})
-                wandb.log(wandb_epoch_dict)  # update logs per epoch
+            # im = show_slices_gt([slice_0, slice_1, slice_2],[bslice_0, bslice_1, bslice_2], epoch)
+            # if args.logging:
+            #     image = wandb.Image(im, caption=f"{config.DATASET.LR_CONTRAST2} prediction vs gt.")
+            #     wandb_epoch_dict.update({f"{config.DATASET.LR_CONTRAST2}": image})
+            #     wandb.log(wandb_epoch_dict)  # update logs per epoch
             
-            mi_buffer[1:] = mi_buffer[:-1]  # shifting buffer
-            mi_buffer[0] = metrics_mi_pred["mi"]  # update buffer
-            curr_mean = np.mean(np.abs(mi_buffer[:-1]-mi_buffer[1:]))  # srtore diff of abs change
-            print("Current buffer: ", mi_buffer, "mean:", curr_mean)
+            # mi_buffer[1:] = mi_buffer[:-1]  # shifting buffer
+            # mi_buffer[0] = metrics_mi_pred["mi"]  # update buffer
+            # curr_mean = np.mean(np.abs(mi_buffer[:-1]-mi_buffer[1:]))  # srtore diff of abs change
+            # print("Current buffer: ", mi_buffer, "mean:", curr_mean)
 
-            if np.abs(curr_mean-mi_mean)<0.0001:
-                if args.early_stopping:
-                    print("Early stopping training", mi_buffer)
-                    break
+            # if np.abs(curr_mean-mi_mean)<0.0001:
+            #     if args.early_stopping:
+            #         print("Early stopping training", mi_buffer)
+            #         break
 
-            else:
-                mi_mean = curr_mean
+            # else:
+            #     mi_mean = curr_mean
+
+            # ------- output segmentation -------
+            if "Seg" in getattr(config.MODEL, "MODEL_CLASS", None):
+                _, t2_dict = dataset.get_continuous_label_dict()
+
+                inference_seg = model_intensities[:,2:(2+seg_label_num)]
+                inference_seg = my_softmax(inference_seg)
+                inference_seg_label = np.argmax(inference_seg, axis=1)
+                inference_seg_arr = np.array(inference_seg_label, dtype=np.uint8)
+                inference_seg = inference_seg_arr.reshape(-1, 1)
+                img_inference_seg = inference_seg.reshape((x_dim, y_dim, z_dim))
+
+                img_inference_seg_original_label = img_inference_seg.copy()
+                for k, v in t2_dict.items():
+                    img_inference_seg_original_label[img_inference_seg == k] = v
+
+                seg = nib.Nifti1Image(img_inference_seg_original_label, affine)
+                if (epoch + 1) % 10 == 0:
+                    nib.save(seg, os.path.join(subject_specific_model_save_path, model_name_epoch.replace("model.pt", f"_seg.nii.gz")))
 
         else:
 
@@ -578,8 +593,6 @@ def main(args):
             label_arr = np.array(model_intensities, dtype=np.float32)
             model_intensities= scaler.fit_transform(label_arr.reshape(-1, 1))
             inference_time = time.time() - start
-            if args.logging:
-                wandb_epoch_dict.update({'inference_time': inference_time})
 
             print("Generating NIFTIs.")
             gt_contrast1 = dataset.get_contrast1_gt().reshape((x_dim, y_dim, z_dim)).cpu().numpy()
@@ -595,53 +608,36 @@ def main(args):
             gt = scaler.fit_transform(gt.reshape(-1, 1)).reshape((x_dim, y_dim, z_dim))
 
             img = model_intensities.reshape((x_dim, y_dim, z_dim))
-            pred = img
-            metrics = compute_metrics(gt=gt.copy(), pred=pred.copy(), mask=dataset.get_contrast1_gt_mask(), lpips_loss=lpips_loss, device=device)
-            metrics_mi_true = compute_mi_hist(gt.copy(), gt_other.copy(), dataset.get_contrast2_gt_mask(), bins=32)
-            metrics_mi = compute_mi_hist(pred.copy(), gt_other.copy(), dataset.get_contrast2_gt_mask(), bins=32)
+            # pred = img
+            # metrics = compute_metrics(gt=gt.copy(), pred=pred.copy(), mask=dataset.get_contrast1_gt_mask(), lpips_loss=lpips_loss, device=device)
+            # metrics_mi_true = compute_mi_hist(gt.copy(), gt_other.copy(), dataset.get_contrast2_gt_mask(), bins=32)
+            # metrics_mi = compute_mi_hist(pred.copy(), gt_other.copy(), dataset.get_contrast2_gt_mask(), bins=32)
 
-            if args.logging:
-                if config.TRAINING.CONTRAST2_ONLY:
-                    wandb_epoch_dict.update({f'contrast2_ssim': metrics["ssim"]})
-                    wandb_epoch_dict.update({f'contrast2_psnr': metrics["psnr"]})
-                    wandb_epoch_dict.update({f'contrast2_lpips': metrics["lpips"]})
-                    wandb_epoch_dict.update({f'MI_error_contrast2': np.abs(metrics_mi["mi"]-metrics_mi_true["mi"])})
-
-                else:
-                    wandb_epoch_dict.update({f'contrast1_ssim': metrics["ssim"]})
-                    wandb_epoch_dict.update({f'contrast1_psnr': metrics["psnr"]})
-                    wandb_epoch_dict.update({f'contrast1_lpips': metrics["lpips"]})
-                    wandb_epoch_dict.update({f'MI_error_contrast1': np.abs(metrics_mi["mi"]-metrics_mi_true["mi"])})
 
             if config.TRAINING.CONTRAST2_ONLY:
                 nifti_name = model_name_epoch.replace("model.pt", f"_ct2.nii.gz")
             else:
                 nifti_name = model_name_epoch.replace("model.pt", f"_ct1.nii.gz")
 
-            slice_0 = img[int(x_dim/2), :, :]
-            slice_1 = img[:, int(y_dim/2), :]
-            slice_2 = img[:, :, int(z_dim/2)]
+            # slice_0 = img[int(x_dim/2), :, :]
+            # slice_1 = img[:, int(y_dim/2), :]
+            # slice_2 = img[:, :, int(z_dim/2)]
 
-            bslice_0 = gt[int(x_dim/2), :, :]
-            bslice_1 = gt[:, int(y_dim/2), :]
-            bslice_2 = gt[:, :, int(z_dim/2)]
+            # bslice_0 = gt[int(x_dim/2), :, :]
+            # bslice_1 = gt[:, int(y_dim/2), :]
+            # bslice_2 = gt[:, :, int(z_dim/2)]
 
-            im = show_slices_gt([slice_0, slice_1, slice_2],[bslice_0, bslice_1, bslice_2], epoch)
-            if args.logging:
-                if config.TRAINING.CONTRAST2_ONLY:
-                    image = wandb.Image(im, caption=f"{config.DATASET.LR_CONTRAST2} prediction vs gt.")
-                    wandb_epoch_dict.update({f"{config.DATASET.LR_CONTRAST2}": image})
-                else:
-                    image = wandb.Image(im, caption=f"{config.DATASET.LR_CONTRAST1} prediction vs gt.")
-                    wandb_epoch_dict.update({f"{config.DATASET.LR_CONTRAST1}": image})
+            # im = show_slices_gt([slice_0, slice_1, slice_2],[bslice_0, bslice_1, bslice_2], epoch)
+            # if args.logging:
+            #     if config.TRAINING.CONTRAST2_ONLY:
+            #         writer.add_image(f"{config.DATASET.LR_CONTRAST2}", im, epoch, dataformats='HWC')
+            #     else:
+            #         writer.add_image(f"{config.DATASET.LR_CONTRAST1}", im, epoch, dataformats='HWC')
 
             affine = np.array(mgrid_affine)
             img = nib.Nifti1Image(img, affine)
             if epoch == (config.TRAINING.EPOCHS -1):
                 nib.save(img, os.path.join(image_dir, nifti_name))
-            
-            if args.logging:
-                wandb.log(wandb_epoch_dict)  # update logs per epoch
 
 
 if __name__ == '__main__':
