@@ -96,13 +96,15 @@ def main(args):
 
 
     # logging run
+    save_path = config_dict["SETTINGS"]["SAVE_PATH"]
     if args.logging:
-        wandb.login()
-        wandb.init(config=config_dict, project=config.SETTINGS.PROJECT_NAME)
+        logging_path = join(save_path, 'log', getattr(config.MODEL, "MODEL_CLASS", None))
+        curr_logging_path = join(logging_path, config.DATASET.SUBJECT_ID)
+        writer = SummaryWriter(log_dir=curr_logging_path)
 
     # make directory for models
-    weight_dir = f'runs/{config.SETTINGS.PROJECT_NAME}_weights'
-    image_dir = f'runs/{config.SETTINGS.PROJECT_NAME}_images'
+    weight_dir = join(save_path, 'weights')
+    image_dir = join(save_path, 'images')
 
     pathlib.Path(weight_dir).mkdir(parents=True, exist_ok=True)
     pathlib.Path(image_dir).mkdir(parents=True, exist_ok=True)
@@ -114,22 +116,26 @@ def main(args):
     device = f'cuda:{config.SETTINGS.GPU_DEVICE}' if torch.cuda.is_available() else 'cpu'
     device = torch.device(device)
 
-    # load dataset
-    dataset = MultiModalDataset(
+    # ------- Dataset -------
+    dataset_name = getattr(config.DATASET, "DATASET_CLASS", None)
+    dataset_cls = dataset_class_map.get(dataset_name, MultiModalDataset)  # the original one is the default class
+    dataset = dataset_cls(
                     image_dir = config.SETTINGS.DIRECTORY,
                     name = config.SETTINGS.PROJECT_NAME,
                     subject_id=config.DATASET.SUBJECT_ID,
                     contrast1_LR_str=config.DATASET.LR_CONTRAST1,
-                    contrast2_LR_str=config.DATASET.LR_CONTRAST2, 
+                    contrast2_LR_str=config.DATASET.LR_CONTRAST2,
+                    config=config
                     )
 
 
-    # Model Selection
+    # ------- Model -------
     model_name = (
                 f'{config.SETTINGS.PROJECT_NAME}_subid-{config.DATASET.SUBJECT_ID}_'
                 f'ct1LR-{config.DATASET.LR_CONTRAST1}_ct2LR-{config.DATASET.LR_CONTRAST2}_'
                 f's_{config.TRAINING.SEED}_shuf_{config.TRAINING.SHUFFELING}_'
     )
+    final_model_name = getattr(config.MODEL, "MODEL_CLASS", None)
 
 
     # output_size
