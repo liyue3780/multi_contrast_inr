@@ -22,6 +22,10 @@ def dict2obj(dict1):
 def get_string(my_dict):
     return '_'.join([str(value) for value in my_dict.values()])
 
+def my_softmax(x, axis=1):
+    e_x = np.exp(x - np.max(x, axis=axis, keepdims=True))  # for numerical stability
+    return e_x / e_x.sum(axis=axis, keepdims=True)
+
 
 def flatten_dict(d, parent_key='', sep='_'):
     items = []
