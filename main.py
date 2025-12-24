@@ -7,17 +7,19 @@ import pathlib
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-import wandb
+from torch.utils.tensorboard import SummaryWriter
+from os.path import join
 import nibabel as nib
 import numpy as np
 import lpips
 
-from model import MLPv1, MLPv2, Siren, WireReal
-from dataset import MultiModalDataset, InferDataset
+from model import MLPv1, MLPv2, Siren, WireReal, MLPv2WithEarlySeg
+from dataset import MultiModalDataset, InferDataset, MultiModalMultiSegDataset
 from visualization_utils import show_slices_gt
 from sklearn.preprocessing import MinMaxScaler
-from utils import input_mapping, compute_metrics, dict2obj, get_string, compute_mi_hist, compute_mi
+from utils import input_mapping, compute_metrics, dict2obj, get_string, compute_mi_hist, compute_mi, my_softmax
 from loss_functions import MILossGaussian, NMI, NCC
+from registry import dataset_class_map, model_class_map
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train Neural Implicit Function for a single scan.')
@@ -39,8 +41,8 @@ def parse_args():
 def main(args):
 
     # Init arguments 
-    os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
-    os.environ["CUDA_VISIBLE_DEVICES"] = ','.join(map(str, args.cuda_visible_device))
+    # os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
+    # os.environ["CUDA_VISIBLE_DEVICES"] = ','.join(map(str, args.cuda_visible_device))
 
     # Load the config 
     with open(args.config) as f:
