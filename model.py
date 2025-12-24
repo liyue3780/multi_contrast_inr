@@ -67,6 +67,54 @@ class MLPv2(nn.Module):
         return torch.cat((x1,x2),dim=1)
 
 
+class MLPv2WithEarlySeg(nn.Module):
+    def __init__(self, input_size=3, hidden_size=512, output_size=1, dropout=0, num_layers=5, seg_label_num=1):
+        super(MLPv2WithEarlySeg, self).__init__()
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.output_size = output_size
+        self.dropout = dropout
+        self.num_layers = num_layers
+
+        # pick first fc out
+        self.first_fc = fc_block(self.hidden_size, self.hidden_size, self.dropout)
+
+        # all other fc layers
+        fc_blocks = [fc_block(self.hidden_size,self.hidden_size, self.dropout) for i in range(1, self.num_layers)]
+        self.fc = nn.Sequential(*fc_blocks)
+
+        self.fc_in = nn.Linear(self.input_size, self.hidden_size)
+        self.fc_out1 = nn.Linear(self.hidden_size, self.hidden_size//2)
+        self.fc_out2 = nn.Linear(self.hidden_size, self.hidden_size//2)
+        self.out1 = nn.Linear(self.hidden_size//2, self.output_size//2)
+        self.out2 = nn.Linear(self.hidden_size//2, self.output_size//2)
+        self.dropout_layer = nn.Dropout(self.dropout)
+
+        # add seg branch at the last head
+        self.fc_out_seg = nn.Linear(self.hidden_size, self.hidden_size//2)
+        self.out_seg = nn.Linear(self.hidden_size//2, seg_label_num)  # how many labels do I have, how many outputs here has
+
+    def forward(self, x):
+        # flatten image
+        x = x.view(-1, self.input_size)
+        x = F.relu(self.fc_in(x))
+        x = self.dropout_layer(x)
+        x_intermediate = self.first_fc(x)
+        x = self.fc(x_intermediate)
+
+        # add output layer
+        x1 = x
+        x2 = x
+        x1 = self.out1(F.relu(self.fc_out1(x1)))
+        x2 = self.out2(F.relu(self.fc_out2(x2)))
+
+        # seg output
+        x3 = x_intermediate
+        x3 = self.out_seg(F.relu(self.fc_out_seg(x3)))
+
+        return torch.cat((x1,x2,x3),dim=1)
+
+
 class MLPv3(nn.Module):
     def __init__(self, input_size=3, hidden_size=512, output_size=1, dropout=0, num_layers=5, num_layers_head=3):
         super(MLPv3, self).__init__()
