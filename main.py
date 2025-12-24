@@ -161,6 +161,7 @@ def main(args):
         input_size = 3
 
     # Model Selection
+    seg_label_num = None  # Initialize seg_label_num
     if config.MODEL.USE_SIREN:
         model = Siren(in_features=input_size, out_features=output_size, hidden_features=config.MODEL.HIDDEN_CHANNELS,
                     hidden_layers=config.MODEL.NUM_LAYERS, first_omega_0=config.SIREN.FIRST_OMEGA_0, hidden_omega_0=config.SIREN.HIDDEN_OMEGA_0)   # no dropout implemented
@@ -178,9 +179,21 @@ def main(args):
             if (config.TRAINING.CONTRAST1_ONLY or config.TRAINING.CONTRAST2_ONLY) == True:
                 raise ValueError('Do not use MLPv2 for single contrast.')
 
-            model = MLPv2(input_size=input_size, output_size=output_size, hidden_size=config.MODEL.HIDDEN_CHANNELS,
-                        num_layers=config.MODEL.NUM_LAYERS, dropout=config.MODEL.DROPOUT)
-            model_name = f'{model_name}_MLP2_'
+            # select model according to the config file
+            model_cls_name = getattr(config.MODEL, "MODEL_CLASS", None)
+            model_cls = model_class_map.get(model_cls_name, MLPv2)  # if the config doesn't have such a 
+            
+            # check if model can load correctly
+            if "Seg" not in model_cls_name:
+                model = model_cls(input_size=input_size, output_size=output_size, hidden_size=config.MODEL.HIDDEN_CHANNELS,
+                                  num_layers=config.MODEL.NUM_LAYERS, dropout=config.MODEL.DROPOUT)
+            else:
+                seg_label_num = dataset.get_label_num()
+                model = model_cls(input_size=input_size, output_size=output_size, hidden_size=config.MODEL.HIDDEN_CHANNELS,
+                                  num_layers=config.MODEL.NUM_LAYERS, dropout=config.MODEL.DROPOUT, seg_label_num=seg_label_num)
+
+            model_name = f'{model_name}_{model_cls_name}_'
+
         else:
             model = MLPv1(input_size=input_size, output_size=output_size, hidden_size=config.MODEL.HIDDEN_CHANNELS,
                         num_layers=config.MODEL.NUM_LAYERS, dropout=config.MODEL.DROPOUT)
@@ -200,6 +213,7 @@ def main(args):
         criterion = nn.MSELoss()
     else:
         raise ValueError('Loss function not defined!')
+    criterion_seg = nn.BCELoss()  # for the model with seg as input
 
     model_name = f'{model_name}_{config.TRAINING.LOSS}__{config.TRAINING.LOSS_MSE_C1}__{config.TRAINING.LOSS_MSE_C2}_'     
 
@@ -234,35 +248,54 @@ def main(args):
                                  num_workers=config.SETTINGS.NUM_WORKERS)
 
     for epoch in range(config.TRAINING.EPOCHS):
-        # set model to train
-        model.train()
-        wandb_epoch_dict = {}
+        print(f'running epoch {epoch}')
 
+        # save path: model weight
         model_name_epoch = f'{model_name}_e{int(epoch)}_model.pt'  
         model_path = os.path.join(weight_dir, model_name_epoch)
 
-        print(model_path)
+        # save path: output image
+        subject_save_path = join(image_dir, config.DATASET.SUBJECT_ID)
+        if final_model_name is not None:
+            subject_specific_model_save_path = join(subject_save_path, final_model_name)
+        else:
+            subject_specific_model_save_path = join(subject_save_path, model_name)
+        os.makedirs(subject_specific_model_save_path, exist_ok=True)
+
+        model.train()
 
         loss_epoch = 0.0
         start = time.time()
 
         for batch_idx, (data, labels, segm) in enumerate(train_dataloader):
             loss_batch = 0
-            wandb_batch_dict = {}
 
-            if not config.TRAINING.CONTRAST1_ONLY and not config.TRAINING.CONTRAST2_ONLY:               
+            # ------- data -------
+            if not config.TRAINING.CONTRAST1_ONLY and not config.TRAINING.CONTRAST2_ONLY:
+                # this is actually constrast 2 in dataset
                 contrast1_mask = (labels[:,0] != -1.0)
                 contrast1_labels = labels[contrast1_mask,0]
                 contrast1_labels = contrast1_labels.reshape(-1,1).to(device=device)
                 contrast1_segm = segm[contrast1_mask,:]
                 contrast1_data = data[contrast1_mask,:]
                 
+                # this is actually constrast 1 in dataset
                 contrast2_mask = (labels[:,1] != -1.0)
                 contrast2_labels = labels[contrast2_mask,1]
                 contrast2_labels = contrast2_labels.reshape(-1,1).to(device=device)
                 contrast2_segm = segm[contrast2_mask,:]
                 contrast2_data = data[contrast2_mask,:]
 
+                # take the segmentation label (third column in lables)
+                # use model name to control it
+                if "Seg" in getattr(config.MODEL, "MODEL_CLASS", None):
+                    seg_labels_ct1 = labels[contrast1_mask, 2:]
+                    seg_labels_ct2 = labels[contrast2_mask, 2:]
+
+                    seg_labels = torch.cat((seg_labels_ct1, seg_labels_ct2), dim=0)
+                    seg_labels = seg_labels.to(device=device)
+                
+                # fuse ct1 and ct2 labels together
                 data = torch.cat((contrast1_data,contrast2_data), dim=0)
                 labels = torch.cat((contrast1_labels,contrast2_labels), dim=0)
 
@@ -292,7 +325,7 @@ def main(args):
             elif config.MODEL.USE_SIREN:
                 data = data*np.pi
 
-            # pass to model
+            # ------- model -------
             target = model(data)
 
             if config.MODEL.USE_SIREN or config.MODEL.USE_WIRE_REAL: # TODO check syntax compatibility
@@ -303,6 +336,10 @@ def main(args):
                 mse_target1 = target[:len(contrast1_data),0:1]  # contrast1 output for contrast1 coordinate
                 mse_target2 = target[len(contrast1_data):,1:2]  # contrast2 output for contrast2 coordinate
 
+                # if there is the third head, take the results of the seg prediction
+                if "Seg" in getattr(config.MODEL, "MODEL_CLASS", None):
+                    seg_pred = target[:,2:(2+seg_label_num)]  # not limited with any ct1 or ct2
+                    
                 if config.MI_CC.MI_USE_PRED:
                     mi_target1 = target[:,0:1]
                     mi_target2 = target[:,1:2]
@@ -315,88 +352,87 @@ def main(args):
                 # for contrast 1 or contrast 2 only 
                 target_mse = target
                    
+            # ------- loss -------
             if not config.TRAINING.CONTRAST1_ONLY and not config.TRAINING.CONTRAST2_ONLY:  
                 loss = config.TRAINING.LOSS_MSE_C1*criterion(mse_target1, contrast1_labels)+config.TRAINING.LOSS_MSE_C2*criterion(mse_target2, contrast2_labels)
+                if args.logging:
+                    writer.add_scalar('mse_loss', loss.detach().cpu().item(), epoch * len(train_dataloader) + batch_idx)
+
+                # add seg loss
+                if "Seg" in getattr(config.MODEL, "MODEL_CLASS", None):
+                    seg_pred = torch.softmax(seg_pred, dim=1)
+
+                    # only supervise the non -1 value in the label
+                    non_minus1_mask = (seg_labels[:, 0] != -1)
+                    seg_pred = seg_pred[non_minus1_mask, :]
+                    seg_labels = seg_labels[non_minus1_mask, :]
+
+                    # I only calculate foreground loss here
+                    seg_pred = seg_pred[:, 1:]
+                    seg_labels = seg_labels[:, 1:]
+                    loss_seg = criterion_seg(seg_pred, seg_labels)
+                    loss = loss + loss_seg
+
+                    if args.logging:
+                        writer.add_scalar('seg_loss', loss_seg.detach().cpu().item(), epoch * len(train_dataloader) + batch_idx)
+                        writer.add_scalar('total_loss', loss.detach().cpu().item(), epoch * len(train_dataloader) + batch_idx)
             
             else:
                 loss = criterion(target_mse, labels)
-            
-            if args.logging:
-                wandb_batch_dict.update({'mse_loss': loss.item()})
             
             # mutual information loss
             if config.TRAINING.USE_MI or config.TRAINING.USE_NMI:
                 if config.MI_CC.MI_USE_PRED:
                     mi_loss = mi_criterion(mi_target1.unsqueeze(0).unsqueeze(0), mi_target2.unsqueeze(0).unsqueeze(0))
                     loss += config.MI_CC.LOSS_MI*(mi_loss)
-                    if args.logging:
-                        wandb_batch_dict.update({'mi_loss': (mi_loss).item()})
                 else:
                     mi_loss1 = mi_criterion(mi_target1.unsqueeze(0).unsqueeze(0), contrast1_labels[contrast1_segm].unsqueeze(0).unsqueeze(0))
                     mi_loss2 = mi_criterion(mi_target2.unsqueeze(0).unsqueeze(0), contrast2_labels[contrast2_segm].unsqueeze(0).unsqueeze(0))
                     loss += config.MI_CC.LOSS_MI*(mi_loss1+mi_loss2)
-                    if args.logging:
-                        wandb_batch_dict.update({'mi_loss': (mi_loss1+mi_loss2).item()})
                         
             if config.TRAINING.USE_CC:
                 cc_loss1 = cc_criterion(mi_target1.unsqueeze(0).unsqueeze(0), contrast1_labels[contrast1_segm].unsqueeze(0).unsqueeze(0))
                 cc_loss2 = cc_criterion(mi_target2.unsqueeze(0).unsqueeze(0), contrast2_labels[contrast2_segm].unsqueeze(0).unsqueeze(0))
                 loss += config.MI_CC.LOSS_CC*(cc_loss1+cc_loss2)
-                if args.logging:
-                    wandb_batch_dict.update({'cc_loss': -(cc_loss1+cc_loss2).item()})
                     
                 
-            # zero gradients
+            # ------- optimize -------
             optimizer.zero_grad()
-            # backprop
             loss.backward()
             optimizer.step()
-            # epoch loss
             loss_batch += loss.item()
             loss_epoch += loss_batch
 
-            if args.logging:
-                wandb_batch_dict.update({'batch_loss': loss_batch})
-                wandb.log(wandb_batch_dict)  # update logs per batch
+        # add total loss for the epoch
+        if args.logging:
+            writer.add_scalar('total_loss', loss_epoch / len(train_dataloader), epoch)
 
         # collect epoch stats
         epoch_time = time.time() - start
-
         lr = optimizer. param_groups[0]["lr"]
-        if args.logging:
-            wandb_epoch_dict.update({'epoch_no': epoch})
-            wandb_epoch_dict.update({'epoch_time': epoch_time})
-            wandb_epoch_dict.update({'epoch_loss': loss_epoch})
-            wandb_epoch_dict.update({'lr': lr})
-
         if epoch == (config.TRAINING.EPOCHS -1):
             torch.save(model.state_dict(), model_path)
-
         scheduler.step()
+
         ################ INFERENCE #######################
         model_inference = model
         model_inference.eval()
-
-        # start inference
         start = time.time()
 
-        # coordinate grid, affine and inference dataset are static
-        # only process once!
-
         if epoch == 0:
-
-            # assumes GT contrasts share common grid and affine
             mgrid = dataset.get_coordinates()
+            infer_data = InferDataset(mgrid)
             mgrid_affine = dataset.get_affine()
             x_dim, y_dim, z_dim = dataset.get_dim()
-
-            infer_data = InferDataset(mgrid)
             infer_loader = torch.utils.data.DataLoader(infer_data,
                                                        batch_size=5000,
                                                        shuffle=False,
                                                        num_workers=config.SETTINGS.NUM_WORKERS)
 
-        out = np.zeros((int(x_dim*y_dim*z_dim), 2))
+        if "Seg" in getattr(config.MODEL, "MODEL_CLASS", None):
+            out = np.zeros((int(x_dim*y_dim*z_dim), (2+seg_label_num)))  # add the label column
+        else:
+            out = np.zeros((int(x_dim*y_dim*z_dim), 2))
         model_inference.to(device)
         for batch_idx, (data) in enumerate(infer_loader):
 
