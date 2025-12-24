@@ -6,7 +6,7 @@ import nibabel as nib
 import numpy as np
 from torch.utils.data import Dataset
 import torch.nn.functional as F
-from dataset_utils import norm_grid, get_image_coordinate_grid_nib
+from dataset_utils import norm_grid, get_image_coordinate_grid_nib, get_seg_coordinate_grid_nib, pad_tensor_columns, convert_seg_to_continuous
 
 class _BaseDataset(Dataset):
     """Base dataset class"""
@@ -44,9 +44,10 @@ class MultiModalDataset(_BaseDataset):
                 subject_id: str = "123456", 
                 contrast1_LR_str: str= 'flair3d_LR', 
                 contrast2_LR_str: str='dir_LR',
-  
-                transform = None, target_transform = None):
+                transform = None, target_transform = None,
+                config = None):
         super(MultiModalDataset, self).__init__(image_dir)
+        self.config = config
         self.dataset_name = name
         self.subject_id = subject_id
         self.contrast1_LR_str = contrast1_LR_str
@@ -236,6 +237,90 @@ class InferDataset(Dataset):
     def __getitem__(self, idx):
         data = self.grid[idx]
         return data
+
+
+class MultiModalMultiSegDataset(MultiModalDataset):
+    def __init__(self, image_dir = "",
+                 name="BrainLesionDataset",
+                 subject_id = "123456",
+                 contrast1_LR_str = 'flair3d_LR',
+                 contrast2_LR_str = 'dir_LR',
+                 transform=None,
+                 target_transform=None,
+                 config=None):
+        super().__init__(image_dir, name, subject_id, contrast1_LR_str, contrast2_LR_str, transform, target_transform, config)
+
+        # set file names
+        self.contrast1_LR_seg_str = contrast1_LR_str.replace("LR", "seg_LR")
+        self.contrast2_LR_seg_str = contrast2_LR_str.replace("LR", "seg_LR")
+
+        files = sorted(list(Path(self.image_dir).rglob('*.nii.gz')))
+        files = [str(x) for x in files]
+        files = [k for k in files if self.subject_id in k]
+
+        self.lr_contrast1_seg = [x for x in files if self.contrast1_LR_seg_str in x and 'seg' in x][0]
+        self.lr_contrast2_seg = [x for x in files if self.contrast2_LR_seg_str in x and 'seg' in x][0]
+
+        self.lr_contrast1_seg, self.t1_continuous_label_dict = convert_seg_to_continuous(self.lr_contrast1_seg)
+        self.lr_contrast2_seg, self.t2_continuous_label_dict = convert_seg_to_continuous(self.lr_contrast2_seg)
+
+        # the number of label classes
+        self.label_num = None
+
+        # add segmentation labels
+        self._process_seg()
+    
+    def get_continuous_label_dict(self):
+        return self.t1_continuous_label_dict, self.t2_continuous_label_dict
+    
+    def get_label_num(self):
+        return self.label_num
+    
+    def _process_seg(self):
+        print(f"Using {self.lr_contrast1_seg} as lr contrast1 seg.")
+        print(f"Using {self.lr_contrast2_seg} as lr contrast2 seg.")
+
+        # read segmentation images as two other inputs (same level as other two input images)
+        contrast1_seg_dict = get_seg_coordinate_grid_nib(nib.load(str(self.lr_contrast1_seg)))
+        contrast2_seg_dict = get_seg_coordinate_grid_nib(nib.load(str(self.lr_contrast2_seg)))
+
+        # ------- input: coordinate -------
+        data_ct1_seg = contrast1_seg_dict["coordinates"]
+        data_ct2_seg = contrast2_seg_dict["coordinates"]
+
+        min1, max1 = data_ct1_seg.min(), data_ct1_seg.max()
+        min2, max2 = data_ct2_seg.min(), data_ct2_seg.max()
+        min_c, max_c = np.min(np.array([min1, min2])), np.max(np.array([max1, max2]))
+        print(f'Min/Max of Seg 1 {min1, max1}')
+        print(f'Min/Max of Seg 2 {min2, max2}')
+        print(f'Global Min/Max of Seg {min_c, max_c}')
+        data_ct1_seg = norm_grid(data_ct1_seg, xmin=min_c, xmax=max_c)
+        data_ct2_seg = norm_grid(data_ct2_seg, xmin=min_c, xmax=max_c)
+        
+        # check if the seg coordinate same with the image input
+        data_seg = torch.cat((data_ct1_seg, data_ct2_seg), dim=0)
+        # if not torch.equal(data_seg, self.data):
+        #     raise ValueError('segmentation is not aligned with image')
+
+        # ------- output: one-hot image value -------
+        labels_seg_ct1_one_hot = contrast1_seg_dict["label_one_hot"]
+        labels_seg_ct2_one_hot = contrast2_seg_dict["label_one_hot"]
+        if getattr(self.config.DATASET, "USED_SEG_TYPE", None) == 't2_only':
+            labels_seg_ct1_one_hot = torch.zeros(labels_seg_ct1_one_hot.shape) - 1
+            if labels_seg_ct1_one_hot.shape[1] != labels_seg_ct2_one_hot.shape[1]:
+                labels_seg_ct1_one_hot = pad_tensor_columns(labels_seg_ct1_one_hot, labels_seg_ct2_one_hot.shape[1], pad_value=-1)
+        
+        if labels_seg_ct1_one_hot.shape[1] != labels_seg_ct2_one_hot.shape[1]:
+            raise ValueError('ct1 and ct2 label must be in same column')
+
+        seg_label = torch.cat((labels_seg_ct1_one_hot, labels_seg_ct2_one_hot), dim=0)
+        self.label = torch.cat((self.label, seg_label), dim=1)
+
+        # seg label num
+        self.label_num = contrast2_seg_dict['label_num']
+        if getattr(self.config.DATASET, "USED_SEG_TYPE", None) != 't2_only' and contrast2_seg_dict['label_num'] != contrast1_seg_dict['label_num']:
+            raise ValueError('two modalities label should be same')
+
 
 if __name__ == '__main__':
 
