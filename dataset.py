@@ -59,9 +59,14 @@ class MultiModalDataset(_BaseDataset):
         self.contrast1_GT_mask_str = "brainmask"
         self.contrast2_GT_mask_str = "brainmask"
 
-
-        self.dataset_name = (
-            f'preprocessed_data/{self.dataset_name}_'
+        # Use SAVE_PATH from config if available, otherwise use current directory
+        if self.config is not None and hasattr(self.config, 'SETTINGS') and hasattr(self.config.SETTINGS, 'SAVE_PATH'):
+            base_path = self.config.SETTINGS.SAVE_PATH
+        else:
+            base_path = os.getcwd()
+        
+        dataset_filename = (
+            f'{self.dataset_name}_'
             f'{self.subject_id}_'
             f'{self.contrast1_LR_str}_{self.contrast1_GT_str}_'
             f'{self.contrast2_LR_str}_{self.contrast2_GT_str}_'
@@ -69,6 +74,7 @@ class MultiModalDataset(_BaseDataset):
             f'{self.contrast1_GT_mask_str}_{self.contrast2_GT_mask_str}_'
             f'.pt'
         )
+        self.dataset_name = os.path.join(base_path, 'preprocessed_data', dataset_filename)
 
         print(self.dataset_name)
 
@@ -222,8 +228,9 @@ class MultiModalDataset(_BaseDataset):
             'dim': self.dim,
             'coordinates': self.coordinates,
         }
-        if not os.path.exists(os.path.join(os.getcwd(), os.path.split(self.dataset_name)[0])):
-            os.makedirs(os.path.join(os.getcwd(), os.path.split(self.dataset_name)[0]))
+        preprocessed_dir = os.path.dirname(self.dataset_name)
+        if not os.path.exists(preprocessed_dir):
+            os.makedirs(preprocessed_dir, exist_ok=True)
         torch.save(dataset, self.dataset_name)
 
 class InferDataset(Dataset):
