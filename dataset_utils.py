@@ -8,6 +8,7 @@ from sklearn.preprocessing import MinMaxScaler
 import os
 import SimpleITK as sitk
 from os.path import join
+from picsl_c3d import Convert3D
 
 # from Tancik et al.:
 # https://github.com/tancik/fourier-feature-networks/blob/master/Experiments/3d_MRI.ipynb
@@ -128,12 +129,13 @@ def convert_seg_to_continuous(seg_path):
     output_path = join(tmp_dir, output_name)
     
     label_dict = {}
-    c3d_command = f'c3d {seg_path} -replace'
+    c3d_command = f'{seg_path} -replace'
     for ii, ele_ in enumerate(sorted_a):
         label_dict[ii] = int(ele_)
         c3d_command = c3d_command + f' {int(ele_)} {ii}'
     c3d_command = c3d_command + f' -o {output_path}'
     
-    os.system(c3d_command)
+    c = Convert3D()
+    c.execute(c3d_command)
     
     return output_path, label_dict
