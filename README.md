@@ -63,7 +63,7 @@ For segmentation tasks, your dataset should include segmentation files following
 - `{contrast1_LR_str}_seg_LR.nii.gz` (e.g., `t1_LR_seg_LR.nii.gz`)
 - `{contrast2_LR_str}_seg_LR.nii.gz` (e.g., `t2_LR_seg_LR.nii.gz`)
 
-The segmentation files will be automatically processed and converted to continuous labels using the `c3d` tool.
+The segmentation files will be automatically processed and converted to continuous labels using the `picsl_c3d` Python package.
 
 **Example: Dataset with Segmentation (T1/T2 with segmentation)**
 
@@ -93,8 +93,9 @@ We provide an environment file that can be used to setup a conda environment. As
 
 ### Additional Dependencies for Segmentation
 
-- **c3d**: Command-line tool for image processing (used for segmentation label remapping)
-  - Installation: Download from [ITK-SNAP](https://www.itksnap.org/pmwiki/pmwiki.php?n=Downloads.C3D) or install via package manager
+- **picsl_c3d**: Python bindings for Convert3D (used for segmentation label remapping)
+  - Installation: `pip install picsl_c3d`
+  - GitHub: [picsl_c3d](https://github.com/pyushkevich/c3d_python)
 
 ## Usage
 
