@@ -210,7 +210,8 @@ class MultiModalDataset(_BaseDataset):
         self.gt_contrast2_mask = torch.tensor(nib.load(self.gt_contrast2_mask).get_fdata()).bool()
 
         # inference grid
-        self.coordinates = gt_contrast1_dict["coordinates_norm"]
+        # self.coordinates = gt_contrast1_dict["coordinates_norm"]
+        self.coordinates = norm_grid(gt_contrast1_dict["coordinates"], xmin=min_c, xmax=max_c)
         self.affine = gt_contrast1_dict["affine"]
         self.dim = gt_contrast1_dict["dim"]
 
