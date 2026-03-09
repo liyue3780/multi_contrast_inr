@@ -115,6 +115,11 @@ def main(args):
     
     device = f'cuda:{config.SETTINGS.GPU_DEVICE}' if torch.cuda.is_available() else 'cpu'
     device = torch.device(device)
+    
+    # Limit the number of threads for torch internal operations to prevent potential issues
+    # when training on multiple GPUs on the same machine
+    torch.set_num_threads(config.SETTINGS.NUM_WORKERS)
+    torch.set_num_interop_threads(config.SETTINGS.NUM_WORKERS)
 
     # ------- Dataset -------
     dataset_name = getattr(config.DATASET, "DATASET_CLASS", None)
@@ -266,9 +271,15 @@ def main(args):
 
         loss_epoch = 0.0
         start = time.time()
+        t_inner = 0
+        t_gpu = 0
 
         for batch_idx, (data, labels, segm) in enumerate(train_dataloader):
             loss_batch = 0
+            start_batch = time.time()
+            gpu_start_event = torch.cuda.Event(enable_timing=True)
+            gpu_end_event = torch.cuda.Event(enable_timing=True)
+            gpu_start_event.record(torch.cuda.current_stream())
 
             # ------- data -------
             if not config.TRAINING.CONTRAST1_ONLY and not config.TRAINING.CONTRAST2_ONLY:
@@ -402,6 +413,12 @@ def main(args):
             optimizer.step()
             loss_batch += loss.item()
             loss_epoch += loss_batch
+            
+            gpu_end_event.record(torch.cuda.current_stream())
+            torch.cuda.synchronize()
+            
+            t_inner += time.time() - start_batch
+            t_gpu += gpu_start_event.elapsed_time(gpu_end_event)/1000.0
 
         # add total loss for the epoch
         if args.logging:
@@ -410,6 +427,7 @@ def main(args):
         # collect epoch stats
         epoch_time = time.time() - start
         lr = optimizer. param_groups[0]["lr"]
+        print(f'Epoch {epoch:03d}   Time:  total {epoch_time:4.2f}s inner {t_inner:4.2f} gpu {t_gpu:4.2f}   Loss: {loss_epoch / len(train_dataloader):6.4f}   LR: {lr:.6f}')
         if epoch == (config.TRAINING.EPOCHS -1):
             torch.save(model.state_dict(), model_path)
         scheduler.step()
