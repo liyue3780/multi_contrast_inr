@@ -246,14 +246,24 @@ def main(args):
     
     mi_buffer = np.zeros((4,1))
     mi_mean = -1.0
-
-    # Load Training Data
-    train_dataloader = DataLoader(dataset, batch_size=config.TRAINING.BATCH_SIZE, 
-                                 shuffle=config.TRAINING.SHUFFELING, 
-                                 num_workers=config.SETTINGS.NUM_WORKERS)
-
+    
+    # Instead of relying on the DataLoader with an inefficient __getitem__ method, we will
+    # sample the batches ourselves in a more efficient way by directly indexing the data and labels tensors.
+    
+    # Calculate the number of batches
+    num_batches = int(np.ceil(len(dataset) / config.TRAINING.BATCH_SIZE))
+    
+    # Grid tensor used for inference
+    mgrid = dataset.get_coordinates()
+    mgrid_affine = dataset.get_affine()
+    x_dim, y_dim, z_dim = dataset.get_dim()
+    
+    # Move the training data to the device: it should fit into memory no problem!
+    dt = { 'data': dataset.data.to(device), 'label': dataset.label.to(device), 'mask': dataset.mask.to(device) }
+    
+    # Iterate over the epochs
+    print(f'Starting training for {config.TRAINING.EPOCHS} epochs with batch size {config.TRAINING.BATCH_SIZE}.')
     for epoch in range(config.TRAINING.EPOCHS):
-        print(f'running epoch {epoch}')
 
         # save path: model weight
         model_name_epoch = f'{model_name}_e{int(epoch)}_model.pt'  
@@ -266,20 +276,27 @@ def main(args):
         else:
             subject_specific_model_save_path = join(subject_save_path, model_name)
         os.makedirs(subject_specific_model_save_path, exist_ok=True)
+        
+        # Generate the sampling order for this epoch
+        if config.TRAINING.SHUFFELING:
+            indices = torch.randperm(len(dataset), device=device)
+        else:
+            indices = torch.arange(len(dataset), device=device)
 
         model.train()
 
         loss_epoch = 0.0
         start = time.time()
-        t_inner = 0
-        t_gpu = 0
+        
+        for batch_idx in range(num_batches):
+            batch_start = batch_idx * config.TRAINING.BATCH_SIZE
+            batch_end = min((batch_idx + 1) * config.TRAINING.BATCH_SIZE, len(dataset))
+            batch_pos = indices[batch_start:batch_end]
+            # data, labels, segm = dataset.data[batch_pos], dataset.label[batch_pos], dataset.mask[batch_pos]
+            data, labels, segm = dt['data'][batch_pos], dt['label'][batch_pos], dt['mask'][batch_pos]
 
-        for batch_idx, (data, labels, segm) in enumerate(train_dataloader):
             loss_batch = 0
             start_batch = time.time()
-            gpu_start_event = torch.cuda.Event(enable_timing=True)
-            gpu_end_event = torch.cuda.Event(enable_timing=True)
-            gpu_start_event.record(torch.cuda.current_stream())
 
             # ------- data -------
             if not config.TRAINING.CONTRAST1_ONLY and not config.TRAINING.CONTRAST2_ONLY:
@@ -335,10 +352,10 @@ def main(args):
                 data = input_mapper(data)
             elif config.MODEL.USE_SIREN:
                 data = data*np.pi
-
+                
             # ------- model -------
             target = model(data)
-
+            
             if config.MODEL.USE_SIREN or config.MODEL.USE_WIRE_REAL: # TODO check syntax compatibility
                 target, _ = target
 
@@ -366,8 +383,9 @@ def main(args):
             # ------- loss -------
             if not config.TRAINING.CONTRAST1_ONLY and not config.TRAINING.CONTRAST2_ONLY:  
                 loss = config.TRAINING.LOSS_MSE_C1*criterion(mse_target1, contrast1_labels)+config.TRAINING.LOSS_MSE_C2*criterion(mse_target2, contrast2_labels)
+                d_mse_loss = loss.item()
                 if args.logging:
-                    writer.add_scalar('mse_loss', loss.detach().cpu().item(), epoch * len(train_dataloader) + batch_idx)
+                    writer.add_scalar('mse_loss', loss.detach().cpu().item(), epoch * num_batches + batch_idx)
 
                 # add seg loss
                 if "Seg" in getattr(config.MODEL, "MODEL_CLASS", None):
@@ -384,9 +402,10 @@ def main(args):
                     loss_seg = criterion_seg(seg_pred, seg_labels)
                     loss = loss + loss_seg
 
+                    d_seg_loss = loss_seg.item()
                     if args.logging:
-                        writer.add_scalar('seg_loss', loss_seg.detach().cpu().item(), epoch * len(train_dataloader) + batch_idx)
-                        writer.add_scalar('total_loss', loss.detach().cpu().item(), epoch * len(train_dataloader) + batch_idx)
+                        writer.add_scalar('seg_loss', loss_seg.detach().cpu().item(), epoch * num_batches + batch_idx)
+                        writer.add_scalar('total_loss', loss.detach().cpu().item(), epoch * num_batches + batch_idx)
             
             else:
                 loss = criterion(target_mse, labels)
@@ -405,55 +424,53 @@ def main(args):
                 cc_loss1 = cc_criterion(mi_target1.unsqueeze(0).unsqueeze(0), contrast1_labels[contrast1_segm].unsqueeze(0).unsqueeze(0))
                 cc_loss2 = cc_criterion(mi_target2.unsqueeze(0).unsqueeze(0), contrast2_labels[contrast2_segm].unsqueeze(0).unsqueeze(0))
                 loss += config.MI_CC.LOSS_CC*(cc_loss1+cc_loss2)
-                    
-                
+                            
             # ------- optimize -------
             optimizer.zero_grad()
             loss.backward()
+            
+            # Check for NaN/Inf values in gradients
+            g_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=100.0)  # clip gradients to prevent explosion
+            # print(f'Epoch {epoch:03d} Batch {batch_idx:03d} Loss: {loss.item():6.4f} [{d_mse_loss:.4f} / {d_seg_loss:.4f}] Grad Norm: {g_norm:.4f}    ')
+            
             optimizer.step()
             loss_batch += loss.item()
             loss_epoch += loss_batch
             
-            gpu_end_event.record(torch.cuda.current_stream())
-            torch.cuda.synchronize()
-            
-            t_inner += time.time() - start_batch
-            t_gpu += gpu_start_event.elapsed_time(gpu_end_event)/1000.0
-
         # add total loss for the epoch
         if args.logging:
-            writer.add_scalar('total_loss', loss_epoch / len(train_dataloader), epoch)
+            writer.add_scalar('total_loss', loss_epoch / num_batches, epoch)
 
         # collect epoch stats
         epoch_time = time.time() - start
         lr = optimizer. param_groups[0]["lr"]
-        print(f'Epoch {epoch:03d}   Time:  total {epoch_time:4.2f}s inner {t_inner:4.2f} gpu {t_gpu:4.2f}   Loss: {loss_epoch / len(train_dataloader):6.4f}   LR: {lr:.6f}')
+        print(f'Epoch {epoch:03d}   Time:  {epoch_time:4.2f}s Loss: {loss_epoch / num_batches:6.5f}   LR: {lr:.6f}')
         if epoch == (config.TRAINING.EPOCHS -1):
             torch.save(model.state_dict(), model_path)
         scheduler.step()
 
         ################ INFERENCE #######################
+        # Only perform inference at every 10th epoch or at the end of training
+        if ((epoch + 1) % 10 > 0) and (epoch < config.TRAINING.EPOCHS -1):
+            continue
+                
         model_inference = model
         model_inference.eval()
         start = time.time()
-
-        if epoch == 0:
-            mgrid = dataset.get_coordinates()
-            infer_data = InferDataset(mgrid)
-            mgrid_affine = dataset.get_affine()
-            x_dim, y_dim, z_dim = dataset.get_dim()
-            infer_loader = torch.utils.data.DataLoader(infer_data,
-                                                       batch_size=5000,
-                                                       shuffle=False,
-                                                       num_workers=config.SETTINGS.NUM_WORKERS)
 
         if "Seg" in getattr(config.MODEL, "MODEL_CLASS", None):
             out = np.zeros((int(x_dim*y_dim*z_dim), (2+seg_label_num)))  # add the label column
         else:
             out = np.zeros((int(x_dim*y_dim*z_dim), 2))
         model_inference.to(device)
-        for batch_idx, (data) in enumerate(infer_loader):
 
+        inference_batch_size = 5000
+        num_batches = int(np.ceil(mgrid.shape[0] / inference_batch_size))
+        for batch_idx in range(num_batches):
+            batch_start = batch_idx * inference_batch_size
+            batch_end = min((batch_idx + 1) * inference_batch_size, mgrid.shape[0])
+            data = mgrid[batch_start:batch_end,:]
+            
             if torch.cuda.is_available():
                 data = data.to(device)
                 
@@ -469,7 +486,7 @@ def main(args):
             if config.MODEL.USE_SIREN or config.MODEL.USE_WIRE_REAL:
                 output, _ = output
 
-            out[batch_idx*5000:(batch_idx*5000 + len(output)),:] = output.cpu().detach().numpy() 
+            out[batch_start:batch_end,:] = output.cpu().detach().numpy() 
 
         model_intensities=out
 
