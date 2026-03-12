@@ -150,8 +150,10 @@ def main(args):
     
     # Limit the number of threads for torch internal operations to prevent potential issues
     # when training on multiple GPUs on the same machine
-    torch.set_num_threads(config.SETTINGS.NUM_WORKERS)
-    torch.set_num_interop_threads(config.SETTINGS.NUM_WORKERS)
+    if torch.get_num_threads() != config.SETTINGS.NUM_WORKERS:
+        torch.set_num_threads(config.SETTINGS.NUM_WORKERS)
+    if torch.get_num_interop_threads() != config.SETTINGS.NUM_WORKERS:
+        torch.set_num_interop_threads(config.SETTINGS.NUM_WORKERS)
 
     # ------- Dataset -------
     dataset_name = getattr(config.DATASET, "DATASET_CLASS", None)
@@ -290,8 +292,13 @@ def main(args):
     mgrid_affine = dataset.get_affine()
     x_dim, y_dim, z_dim = dataset.get_dim()
     
-    # Move the training data to the device: it should fit into memory no problem!
-    dt = { 'data': dataset.data.to(device), 'label': dataset.label.to(device), 'mask': dataset.mask.to(device) }
+    # Move the training data to the device: it should fit into memory no problem! In the process, also mask out points
+    # whose label is -1 in all columns
+    mask_global = torch.any(dataset.label != -1, dim=1)
+    dt = {'data': dataset.data[mask_global,:].to(device), 
+          'label': dataset.label[mask_global,:].to(device), 
+          'mask': dataset.mask[mask_global].to(device) }
+    n_points = dt['data'].shape[0]
     
     # Iterate over the epochs
     print(f'Starting training for {config.TRAINING.EPOCHS} epochs with batch size {config.TRAINING.BATCH_SIZE}.')
@@ -311,9 +318,9 @@ def main(args):
         
         # Generate the sampling order for this epoch
         if config.TRAINING.SHUFFELING:
-            indices = torch.randperm(len(dataset), device=device)
+            indices = torch.randperm(n_points, device=device)
         else:
-            indices = torch.arange(len(dataset), device=device)
+            indices = torch.arange(n_points, device=device)
 
         model.train()
 
@@ -325,7 +332,7 @@ def main(args):
         for batch_idx in range(num_batches):
             with tt["train_total"]:
                 batch_start = batch_idx * config.TRAINING.BATCH_SIZE
-                batch_end = min((batch_idx + 1) * config.TRAINING.BATCH_SIZE, len(dataset))
+                batch_end = min((batch_idx + 1) * config.TRAINING.BATCH_SIZE, n_points)
                 batch_pos = indices[batch_start:batch_end]
                 
                 with tt["prep"]:
@@ -355,18 +362,24 @@ def main(args):
                         # take the segmentation label (third column in lables)
                         # use model name to control it
                         if "Seg" in getattr(config.MODEL, "MODEL_CLASS", None):
-                            seg_labels_ct1 = labels[contrast1_mask, 2:]
-                            seg_labels_ct2 = labels[contrast2_mask, 2:]
+                            
+                            seg_mask = torch.any(labels[:,2:] != -1.0, dim=1)
+                            seg_labels = labels[seg_mask, 2:].to(device=device)
+                            
+                            #seg_labels_ct1 = labels[contrast1_mask  , 2:]
+                            #seg_labels_ct2 = labels[contrast2_mask, 2:]
 
-                            seg_labels = torch.cat((seg_labels_ct1, seg_labels_ct2), dim=0)
-                            seg_labels = seg_labels.to(device=device)
+                            #seg_labels = torch.cat((seg_labels_ct1, seg_labels_ct2), dim=0)
+                            #seg_labels = seg_labels.to(device=device)
                         
                         # fuse ct1 and ct2 labels together
-                        data = torch.cat((contrast1_data,contrast2_data), dim=0)
-                        labels = torch.cat((contrast1_labels,contrast2_labels), dim=0)
+                        # data = torch.cat((contrast1_data,contrast2_data), dim=0)
+                        # labels = torch.cat((contrast1_labels,contrast2_labels), dim=0)
+                        
 
                     else:
                         # we need to filter data and labels
+                        # TODO: refactor this part with new non-aligned segmentations
                         if config.TRAINING.CONTRAST2_ONLY:
                             mask = (labels[:,0] != -1.0)
                             labels = labels[mask,0]
@@ -377,14 +390,6 @@ def main(args):
                             labels = labels[mask,1]
                             labels = labels.reshape(-1,1).to(device=device)
                             data = data[mask,:]      
-
-                    if config.TRAINING.CONTRAST2_ONLY or config.TRAINING.CONTRAST1_ONLY:
-                        if torch.cuda.is_available():
-                            data, labels  = data.to(device=device), labels.to(device=device)
-
-                    else:
-                        if torch.cuda.is_available():
-                            data, contrast1_labels, contrast2_labels  = data.to(device=device), contrast1_labels.to(device=device), contrast2_labels.to(device=device)
                         
                 with tt["encoding"]:
                     if config.MODEL.USE_FF:
@@ -403,20 +408,20 @@ def main(args):
 
                     if not config.TRAINING.CONTRAST1_ONLY and not config.TRAINING.CONTRAST2_ONLY:   
                         # compute the loss on both modalities!
-                        mse_target1 = target[:len(contrast1_data),0:1]  # contrast1 output for contrast1 coordinate
-                        mse_target2 = target[len(contrast1_data):,1:2]  # contrast2 output for contrast2 coordinate
+                        mse_target1 = target[contrast1_mask,0:1]  # contrast1 output for contrast1 coordinate
+                        mse_target2 = target[contrast2_mask,1:2]  # contrast2 output for contrast2 coordinate
 
                         # if there is the third head, take the results of the seg prediction
                         if "Seg" in getattr(config.MODEL, "MODEL_CLASS", None):
-                            seg_pred = target[:,2:(2+seg_label_num)]  # not limited with any ct1 or ct2
+                            seg_pred = target[seg_mask,2:(2+seg_label_num)]  # not limited with any ct1 or ct2
                             
                         if config.MI_CC.MI_USE_PRED:
                             mi_target1 = target[:,0:1]
                             mi_target2 = target[:,1:2]
                             
                         elif config.TRAINING.USE_MI or config.TRAINING.USE_NMI or config.TRAINING.USE_CC:
-                            mi_target1 = target[:len(contrast1_data),1][contrast1_segm.squeeze()]  # contrast2 output for contrast1 coordinate
-                            mi_target2 = target[len(contrast1_data):,0][contrast2_segm.squeeze()]   # contrast1 output for contrast2 coordinate
+                            mi_target1 = target[contrast1_mask,1][contrast1_segm.squeeze()]  # contrast2 output for contrast1 coordinate
+                            mi_target2 = target[contrast2_mask,0][contrast2_segm.squeeze()]   # contrast1 output for contrast2 coordinate
 
                     else:
                         # for contrast 1 or contrast 2 only 

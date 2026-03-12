@@ -59,8 +59,14 @@ def get_image_coordinate_grid_nib(image: nibabel.Nifti1Image):
         x_min, x_max = X.min(), X.max()
         return (X - x_min)/(x_max - x_min)*(s_max - s_min) + s_min
 
+
     coordinates_arr_norm = min_max_scale(X=coordinates_arr, s_min=-1, s_max=1)
-    label_arr_norm = scaler.fit_transform(label_arr.reshape(-1, 1))
+    
+    # Handle constant label arrays (e.g., masks that are all 0 or all 1)
+    if label_arr.min() == label_arr.max():
+        label_arr_norm = np.clip(label_arr, 0, 1).reshape(-1, 1)
+    else:
+        label_arr_norm = scaler.fit_transform(label_arr.reshape(-1, 1))
 
     image_dict = {
         'affine': torch.tensor(img_affine),

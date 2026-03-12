@@ -85,7 +85,7 @@ class MultiModalDataset(_BaseDataset):
 
         # only keep NIFTIs that follow specific subject 
         files = [k for k in files if self.subject_id in k]
-        print(files)
+        # print(files)
 
         # flair3d and flair3d_LR or t1 and t1_LR
         self.gt_contrast1 = [x for x in files if self.contrast1_GT_str in x and self.contrast1_LR_str not in x and 'mask' not in x][0]
@@ -111,6 +111,8 @@ class MultiModalDataset(_BaseDataset):
             self.gt_contrast1_mask = dataset["gt_contrast1_mask"]
             self.gt_contrast2_mask = dataset["gt_contrast2_mask"]
             self.coordinates = dataset["coordinates"]
+            self.min_c = dataset["min_c"]
+            self.max_c = dataset["max_c"]
             print("Skipped preprocessing.")
 
         else:
@@ -180,14 +182,14 @@ class MultiModalDataset(_BaseDataset):
 
         min1, max1 = data_contrast1.min(), data_contrast1.max()
         min2, max2 = data_contrast2.min(), data_contrast2.max()
-        min_c, max_c = np.min(np.array([min1, min2])), np.max(np.array([max1, max2]))
+        self.min_c, self.max_c = np.min(np.array([min1, min2])), np.max(np.array([max1, max2]))
 
         print(f'Min/Max of Contrast 1 {min1, max1}')
         print(f'Min/Max of Contrast 2 {min2, max2}')
-        print(f'Global Min/Max of Contrasts {min_c, max_c}')
+        print(f'Global Min/Max of Contrasts {self.min_c, self.max_c}')
 
-        data_contrast1 = norm_grid(data_contrast1, xmin=min_c, xmax=max_c)
-        data_contrast2 = norm_grid(data_contrast2, xmin=min_c, xmax=max_c)
+        data_contrast1 = norm_grid(data_contrast1, xmin=self.min_c, xmax=self.max_c)
+        data_contrast2 = norm_grid(data_contrast2, xmin=self.min_c, xmax=self.max_c)
         labels_contrast1 = contrast1_dict["intensity_norm"]
         labels_contrast2 = contrast2_dict["intensity_norm"]        
         mask_contrast1 = contrast1_mask_dict["intensity_norm"].bool()
@@ -211,7 +213,7 @@ class MultiModalDataset(_BaseDataset):
 
         # inference grid
         # self.coordinates = gt_contrast1_dict["coordinates_norm"]
-        self.coordinates = norm_grid(gt_contrast1_dict["coordinates"], xmin=min_c, xmax=max_c)
+        self.coordinates = norm_grid(gt_contrast1_dict["coordinates"], xmin=self.min_c, xmax=self.max_c)
         self.affine = gt_contrast1_dict["affine"]
         self.dim = gt_contrast1_dict["dim"]
 
@@ -228,6 +230,8 @@ class MultiModalDataset(_BaseDataset):
             'gt_contrast2_mask': self.gt_contrast2_mask,
             'dim': self.dim,
             'coordinates': self.coordinates,
+            'min_c': self.min_c,
+            'max_c': self.max_c
         }
         preprocessed_dir = os.path.dirname(self.dataset_name)
         if not os.path.exists(preprocessed_dir):
@@ -298,12 +302,12 @@ class MultiModalMultiSegDataset(MultiModalDataset):
 
         min1, max1 = data_ct1_seg.min(), data_ct1_seg.max()
         min2, max2 = data_ct2_seg.min(), data_ct2_seg.max()
-        min_c, max_c = np.min(np.array([min1, min2])), np.max(np.array([max1, max2]))
-        print(f'Min/Max of Seg 1 {min1, max1}')
-        print(f'Min/Max of Seg 2 {min2, max2}')
-        print(f'Global Min/Max of Seg {min_c, max_c}')
-        data_ct1_seg = norm_grid(data_ct1_seg, xmin=min_c, xmax=max_c)
-        data_ct2_seg = norm_grid(data_ct2_seg, xmin=min_c, xmax=max_c)
+        # min_c, max_c = np.min(np.array([min1, min2])), np.max(np.array([max1, max2])) # TODO: min_c, max_c should come from the main image, not seg
+        # print(f'Min/Max of Seg 1 {min1, max1}')
+        # print(f'Min/Max of Seg 2 {min2, max2}')
+        # print(f'Global Min/Max of Seg {min_c, max_c}')
+        data_ct1_seg = norm_grid(data_ct1_seg, xmin=self.min_c, xmax=self.max_c)
+        data_ct2_seg = norm_grid(data_ct2_seg, xmin=self.min_c, xmax=self.max_c)
         
         # check if the seg coordinate same with the image input
         data_seg = torch.cat((data_ct1_seg, data_ct2_seg), dim=0)
@@ -321,8 +325,25 @@ class MultiModalMultiSegDataset(MultiModalDataset):
         if labels_seg_ct1_one_hot.shape[1] != labels_seg_ct2_one_hot.shape[1]:
             raise ValueError('ct1 and ct2 label must be in same column')
 
-        seg_label = torch.cat((labels_seg_ct1_one_hot, labels_seg_ct2_one_hot), dim=0)
-        self.label = torch.cat((self.label, seg_label), dim=1)
+        # Handle special case where the grid of the label image(s) is not the same as the size of the LR image(s)
+        # In this case, we will add the coordinates of the labels as separate data points
+        if data_seg.shape != self.data.shape or data_seg != self.data:
+            print('Segmentation grid is different from image grid. Adding segmentation coordinates as separate data points.')
+            # Extend the data to incorporate additional coordinate values
+            n_img = self.data.shape[0]
+            n_hot = labels_seg_ct1_one_hot.shape[1]  # number of one-hot classes
+            self.data = torch.cat((self.data, data_seg), dim=0)
+            self.label = torch.cat((self.label, torch.ones(data_seg.shape[0], self.label.shape[1]) * -1), dim=0)
+            self.mask = torch.cat((self.mask, torch.ones(data_seg.shape[0], 1, dtype=torch.bool)), dim=0)
+            
+            # For the existing points, we will add -1 for the labels of the segmentation (indicating no label), 
+            # and for the new points, we will add the one-hot labels of the segmentation
+            self.label = torch.cat((self.label, torch.ones(self.data.shape[0], n_hot) * -1), dim=1)
+            self.label[n_img:, -n_hot:] = torch.cat((labels_seg_ct1_one_hot, labels_seg_ct2_one_hot), dim=0)
+
+        else:            
+            seg_label = torch.cat((labels_seg_ct1_one_hot, labels_seg_ct2_one_hot), dim=0)
+            self.label = torch.cat((self.label, seg_label), dim=1)
 
         # seg label num
         self.label_num = contrast2_seg_dict['label_num']
