@@ -77,6 +77,7 @@ def get_image_coordinate_grid_nib(image: nibabel.Nifti1Image):
         'intensity_norm': torch.tensor(label_arr_norm, dtype=torch.float32).view(-1, 1),
         'coordinates': torch.tensor(coordinates_arr, dtype=torch.float32),
         'coordinates_norm': torch.tensor(coordinates_arr_norm, dtype=torch.float32),
+        'points': torch.tensor(points, dtype=torch.float32)
     }
     return image_dict
 

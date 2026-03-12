@@ -7,6 +7,7 @@ import numpy as np
 from torch.utils.data import Dataset
 import torch.nn.functional as F
 from dataset_utils import norm_grid, get_image_coordinate_grid_nib, get_seg_coordinate_grid_nib, pad_tensor_columns, convert_seg_to_continuous
+from scipy.spatial import KDTree
 
 class _BaseDataset(Dataset):
     """Base dataset class"""
@@ -82,6 +83,10 @@ class MultiModalDataset(_BaseDataset):
 
         files = sorted(list(Path(self.image_dir).rglob('*.nii.gz'))) 
         files = [str(x) for x in files]
+        
+        # Images in the output directory should be excluded
+        out_img_dir = os.path.join(base_path, 'images')
+        files = [k for k in files if out_img_dir not in k]
 
         # only keep NIFTIs that follow specific subject 
         files = [k for k in files if self.subject_id in k]
@@ -102,6 +107,7 @@ class MultiModalDataset(_BaseDataset):
             dataset = torch.load(self.dataset_name)
             self.data = dataset["data"]
             self.label = dataset["label"]
+            self.points = dataset["points"]
             self.mask = dataset["mask"]
             self.affine = dataset["affine"]
             self.dim = dataset["dim"]
@@ -201,6 +207,7 @@ class MultiModalDataset(_BaseDataset):
         self.data = torch.cat((data_contrast1, data_contrast2), dim=0)
         self.label = torch.cat((labels_contrast1_stack, labels_contrast2_stack), dim=0)
         self.mask = torch.cat((mask_contrast1, mask_contrast2), dim=0)
+        self.points = torch.cat((contrast1_dict["points"], contrast2_dict["points"]), dim=0)
         self.len = len(self.label)
 
         # store the GT images to compute SSIM and other metrics!
@@ -216,13 +223,14 @@ class MultiModalDataset(_BaseDataset):
         self.coordinates = norm_grid(gt_contrast1_dict["coordinates"], xmin=self.min_c, xmax=self.max_c)
         self.affine = gt_contrast1_dict["affine"]
         self.dim = gt_contrast1_dict["dim"]
-
+        
         # store to avoid preprocessing
         dataset = {
             'len': self.len,
             'data': self.data,
             'mask': self.mask,
             'label': self.label,
+            'points': self.points,
             'affine': self.affine,
             'gt_contrast1': self.gt_contrast1,
             'gt_contrast2': self.gt_contrast2,
@@ -309,41 +317,55 @@ class MultiModalMultiSegDataset(MultiModalDataset):
         data_ct1_seg = norm_grid(data_ct1_seg, xmin=self.min_c, xmax=self.max_c)
         data_ct2_seg = norm_grid(data_ct2_seg, xmin=self.min_c, xmax=self.max_c)
         
-        # check if the seg coordinate same with the image input
-        data_seg = torch.cat((data_ct1_seg, data_ct2_seg), dim=0)
-        # if not torch.equal(data_seg, self.data):
-        #     raise ValueError('segmentation is not aligned with image')
-
-        # ------- output: one-hot image value -------
-        labels_seg_ct1_one_hot = contrast1_seg_dict["label_one_hot"]
-        labels_seg_ct2_one_hot = contrast2_seg_dict["label_one_hot"]
+        # Which label coordinates do we want to import? If t2_only, we can just ignore T1 labels
         if getattr(self.config.DATASET, "USED_SEG_TYPE", None) == 't2_only':
-            labels_seg_ct1_one_hot = torch.zeros(labels_seg_ct1_one_hot.shape) - 1
+            data_seg = data_ct2_seg
+            labels_seg = contrast2_seg_dict["label_one_hot"].to(self.label.dtype)
+        else:
+            data_seg = torch.cat((data_ct1_seg, data_ct2_seg), dim=0)
+            labels_seg_ct1_one_hot = contrast1_seg_dict["label_one_hot"]
+            labels_seg_ct2_one_hot = contrast2_seg_dict["label_one_hot"]
             if labels_seg_ct1_one_hot.shape[1] != labels_seg_ct2_one_hot.shape[1]:
-                labels_seg_ct1_one_hot = pad_tensor_columns(labels_seg_ct1_one_hot, labels_seg_ct2_one_hot.shape[1], pad_value=-1)
+                raise ValueError('ct1 and ct2 label must be in same column')
+            labels_seg = torch.cat((labels_seg_ct1_one_hot, labels_seg_ct2_one_hot), dim=0).to(self.label.dtype)
+                
+        # Create a KDtree to map segmentation coordinates to the nearest image coordinates within tolerance
+        n_hot = labels_seg.shape[1]  # number of one-hot classes
+        kdtree = KDTree(self.data.numpy())
+        dist, nearest_idx = kdtree.query(data_seg, distance_upper_bound=1e-5)
+        p_match = dist != np.inf 
         
-        if labels_seg_ct1_one_hot.shape[1] != labels_seg_ct2_one_hot.shape[1]:
-            raise ValueError('ct1 and ct2 label must be in same column')
-
-        # Handle special case where the grid of the label image(s) is not the same as the size of the LR image(s)
-        # In this case, we will add the coordinates of the labels as separate data points
-        if data_seg.shape != self.data.shape or data_seg != self.data:
-            print('Segmentation grid is different from image grid. Adding segmentation coordinates as separate data points.')
-            # Extend the data to incorporate additional coordinate values
-            n_img = self.data.shape[0]
-            n_hot = labels_seg_ct1_one_hot.shape[1]  # number of one-hot classes
-            self.data = torch.cat((self.data, data_seg), dim=0)
-            self.label = torch.cat((self.label, torch.ones(data_seg.shape[0], self.label.shape[1]) * -1), dim=0)
-            self.mask = torch.cat((self.mask, torch.ones(data_seg.shape[0], 1, dtype=torch.bool)), dim=0)
+        print(f'Number of matches: {p_match.sum()} out of {len(data_seg)} segmentation points.')
+        
+        # For indices that didn't match, add their coordinates to the data
+        if (~p_match).sum() > 0:
+            self.data = torch.cat((self.data, data_seg[~p_match]), dim=0)
+            self.label = torch.cat((self.label, torch.ones(data_seg[~p_match].shape[0], self.label.shape[1]) * -1), dim=0)
+            self.mask = torch.cat((self.mask, torch.ones(data_seg[~p_match].shape[0], 1, dtype=torch.bool)), dim=0)
             
-            # For the existing points, we will add -1 for the labels of the segmentation (indicating no label), 
-            # and for the new points, we will add the one-hot labels of the segmentation
-            self.label = torch.cat((self.label, torch.ones(self.data.shape[0], n_hot) * -1), dim=1)
-            self.label[n_img:, -n_hot:] = torch.cat((labels_seg_ct1_one_hot, labels_seg_ct2_one_hot), dim=0)
+        # Extend the label array with the number of one-hot labels, filling in with -1 for now
+        self.label = torch.cat((self.label, torch.ones(self.data.shape[0], n_hot) * -1), dim=1)
 
-        else:            
-            seg_label = torch.cat((labels_seg_ct1_one_hot, labels_seg_ct2_one_hot), dim=0)
-            self.label = torch.cat((self.label, seg_label), dim=1)
+        # For labels that didn't match, fill in the one-hot labels at the end of the label array
+        if (~p_match).sum() > 0:
+            self.label[-data_seg[~p_match].shape[0]:, -n_hot:] = labels_seg[~p_match]
+            
+        # For labels that matched, fill in the one-hot labels at the correct indices
+        if p_match.sum() > 0:
+            nearest_idx = torch.tensor(nearest_idx, dtype=torch.int64)
+            self.label[nearest_idx[p_match], -n_hot:] = labels_seg[p_match]
+        
+        # Print some statistics on the number of points with labels
+        have_contrast1 = self.label[:, 0] != -1
+        have_contrast2 = self.label[:, 1] != -1
+        have_label = (self.label[:, -n_hot:] != -1).any(dim=1)
+        print(f'Total number of points: {len(self.label)}')
+        print(f'Number of points with contrast1: {have_contrast1.sum()}')
+        print(f'Number of points with contrast2: {have_contrast2.sum()}')
+        print(f'Number of points with label: {have_label.sum()}')
+        print(f'Number of points with contrast1 and label: {(have_contrast1 & have_label).sum()}')
+        print(f'Number of points with contrast2 and label: {(have_contrast2 & have_label).sum()}')
+        print(f'Number of points with contrast1 and contrast2: {(have_contrast1 & have_contrast2).sum()}')        
 
         # seg label num
         self.label_num = contrast2_seg_dict['label_num']
