@@ -21,6 +21,8 @@ from utils import input_mapping, compute_metrics, dict2obj, get_string, compute_
 from loss_functions import MILossGaussian, NMI, NCC
 from registry import dataset_class_map, model_class_map
 
+from tqdm import tqdm
+
 def parse_args():
     parser = argparse.ArgumentParser(description='Train Neural Implicit Function for a single scan.')
     parser.add_argument('--config', default='config.yaml', help='config file (.yaml) containing the hyper-parameters for training.')
@@ -115,6 +117,13 @@ def main(args):
     
     device = f'cuda:{config.SETTINGS.GPU_DEVICE}' if torch.cuda.is_available() else 'cpu'
     device = torch.device(device)
+    
+    # Limit the number of threads for torch internal operations to prevent potential issues
+    # when training on multiple GPUs on the same machine
+    if torch.get_num_threads() != config.SETTINGS.NUM_WORKERS:
+        torch.set_num_threads(config.SETTINGS.NUM_WORKERS)
+    if torch.get_num_interop_threads() != config.SETTINGS.NUM_WORKERS:
+        torch.set_num_interop_threads(config.SETTINGS.NUM_WORKERS)
 
     # ------- Dataset -------
     dataset_name = getattr(config.DATASET, "DATASET_CLASS", None)
@@ -241,14 +250,31 @@ def main(args):
     
     mi_buffer = np.zeros((4,1))
     mi_mean = -1.0
-
-    # Load Training Data
-    train_dataloader = DataLoader(dataset, batch_size=config.TRAINING.BATCH_SIZE, 
-                                 shuffle=config.TRAINING.SHUFFELING, 
-                                 num_workers=config.SETTINGS.NUM_WORKERS)
-
-    for epoch in range(config.TRAINING.EPOCHS):
-        print(f'running epoch {epoch}')
+    
+    # Instead of relying on the DataLoader with an inefficient __getitem__ method, we will
+    # sample the batches ourselves in a more efficient way by directly indexing the data and labels tensors.
+    
+    # Calculate the number of batches
+    num_batches = int(np.ceil(len(dataset) / config.TRAINING.BATCH_SIZE))
+    
+    # Grid tensor used for inference
+    mgrid = dataset.get_coordinates()
+    mgrid_affine = dataset.get_affine()
+    x_dim, y_dim, z_dim = dataset.get_dim()
+    
+    # Move the training data to the device: it should fit into memory no problem! In the process, also mask out points
+    # whose label is -1 in all columns
+    mask_global = torch.any(dataset.label != -1, dim=1)
+    dt = {'data': dataset.data[mask_global,:].to(device), 
+          'label': dataset.label[mask_global,:].to(device), 
+          'mask': dataset.mask[mask_global].to(device) }
+    n_points = dt['data'].shape[0]
+    
+    # Iterate over the epochs
+    print(f'Training INR for {config.TRAINING.EPOCHS} epochs with batch size {config.TRAINING.BATCH_SIZE}.')
+    
+    pbar = tqdm(range(config.TRAINING.EPOCHS), desc="Training INR")
+    for epoch in pbar:
 
         # save path: model weight
         model_name_epoch = f'{model_name}_e{int(epoch)}_model.pt'  
@@ -261,14 +287,28 @@ def main(args):
         else:
             subject_specific_model_save_path = join(subject_save_path, model_name)
         os.makedirs(subject_specific_model_save_path, exist_ok=True)
+        
+        # Generate the sampling order for this epoch
+        if config.TRAINING.SHUFFELING:
+            indices = torch.randperm(n_points, device=device)
+        else:
+            indices = torch.arange(n_points, device=device)
 
         model.train()
 
-        loss_epoch = 0.0
+        loss_epoch = torch.tensor(0.0, device=device)
         start = time.time()
+        
+        for batch_idx in range(num_batches):
+            batch_start = batch_idx * config.TRAINING.BATCH_SIZE
+            batch_end = min((batch_idx + 1) * config.TRAINING.BATCH_SIZE, n_points)
+            batch_pos = indices[batch_start:batch_end]
+            
+            # data, labels, segm = dataset.data[batch_pos], dataset.label[batch_pos], dataset.mask[batch_pos]
+            data, labels, segm = dt['data'][batch_pos], dt['label'][batch_pos], dt['mask'][batch_pos]
 
-        for batch_idx, (data, labels, segm) in enumerate(train_dataloader):
-            loss_batch = 0
+            # loss_batch = 0
+            start_batch = time.time()
 
             # ------- data -------
             if not config.TRAINING.CONTRAST1_ONLY and not config.TRAINING.CONTRAST2_ONLY:
@@ -289,18 +329,24 @@ def main(args):
                 # take the segmentation label (third column in lables)
                 # use model name to control it
                 if "Seg" in getattr(config.MODEL, "MODEL_CLASS", None):
-                    seg_labels_ct1 = labels[contrast1_mask, 2:]
-                    seg_labels_ct2 = labels[contrast2_mask, 2:]
+                    
+                    seg_mask = torch.any(labels[:,2:] != -1.0, dim=1)
+                    seg_labels = labels[seg_mask, 2:].to(device=device)
+                    
+                    #seg_labels_ct1 = labels[contrast1_mask  , 2:]
+                    #seg_labels_ct2 = labels[contrast2_mask, 2:]
 
-                    seg_labels = torch.cat((seg_labels_ct1, seg_labels_ct2), dim=0)
-                    seg_labels = seg_labels.to(device=device)
+                    #seg_labels = torch.cat((seg_labels_ct1, seg_labels_ct2), dim=0)
+                    #seg_labels = seg_labels.to(device=device)
                 
                 # fuse ct1 and ct2 labels together
-                data = torch.cat((contrast1_data,contrast2_data), dim=0)
-                labels = torch.cat((contrast1_labels,contrast2_labels), dim=0)
+                # data = torch.cat((contrast1_data,contrast2_data), dim=0)
+                # labels = torch.cat((contrast1_labels,contrast2_labels), dim=0)
+                
 
             else:
                 # we need to filter data and labels
+                # TODO: refactor this part with new non-aligned segmentations
                 if config.TRAINING.CONTRAST2_ONLY:
                     mask = (labels[:,0] != -1.0)
                     labels = labels[mask,0]
@@ -311,52 +357,46 @@ def main(args):
                     labels = labels[mask,1]
                     labels = labels.reshape(-1,1).to(device=device)
                     data = data[mask,:]      
-
-            if config.TRAINING.CONTRAST2_ONLY or config.TRAINING.CONTRAST1_ONLY:
-                if torch.cuda.is_available():
-                    data, labels  = data.to(device=device), labels.to(device=device)
-
-            else:
-                if torch.cuda.is_available():
-                    data, contrast1_labels, contrast2_labels  = data.to(device=device), contrast1_labels.to(device=device), contrast2_labels.to(device=device)
-
+                    
+            # ------- encoding -------
             if config.MODEL.USE_FF:
                 data = input_mapper(data)
             elif config.MODEL.USE_SIREN:
                 data = data*np.pi
-
+                
             # ------- model -------
             target = model(data)
-
+        
             if config.MODEL.USE_SIREN or config.MODEL.USE_WIRE_REAL: # TODO check syntax compatibility
                 target, _ = target
-
+                    
             if not config.TRAINING.CONTRAST1_ONLY and not config.TRAINING.CONTRAST2_ONLY:   
                 # compute the loss on both modalities!
-                mse_target1 = target[:len(contrast1_data),0:1]  # contrast1 output for contrast1 coordinate
-                mse_target2 = target[len(contrast1_data):,1:2]  # contrast2 output for contrast2 coordinate
+                mse_target1 = target[contrast1_mask,0:1]  # contrast1 output for contrast1 coordinate
+                mse_target2 = target[contrast2_mask,1:2]  # contrast2 output for contrast2 coordinate
 
                 # if there is the third head, take the results of the seg prediction
                 if "Seg" in getattr(config.MODEL, "MODEL_CLASS", None):
-                    seg_pred = target[:,2:(2+seg_label_num)]  # not limited with any ct1 or ct2
+                    seg_pred = target[seg_mask,2:(2+seg_label_num)]  # not limited with any ct1 or ct2
                     
                 if config.MI_CC.MI_USE_PRED:
                     mi_target1 = target[:,0:1]
                     mi_target2 = target[:,1:2]
                     
                 elif config.TRAINING.USE_MI or config.TRAINING.USE_NMI or config.TRAINING.USE_CC:
-                    mi_target1 = target[:len(contrast1_data),1][contrast1_segm.squeeze()]  # contrast2 output for contrast1 coordinate
-                    mi_target2 = target[len(contrast1_data):,0][contrast2_segm.squeeze()]   # contrast1 output for contrast2 coordinate
+                    mi_target1 = target[contrast1_mask,1][contrast1_segm.squeeze()]  # contrast2 output for contrast1 coordinate
+                    mi_target2 = target[contrast2_mask,0][contrast2_segm.squeeze()]   # contrast1 output for contrast2 coordinate
 
             else:
                 # for contrast 1 or contrast 2 only 
                 target_mse = target
-                   
+                
             # ------- loss -------
-            if not config.TRAINING.CONTRAST1_ONLY and not config.TRAINING.CONTRAST2_ONLY:  
+            if not config.TRAINING.CONTRAST1_ONLY and not config.TRAINING.CONTRAST2_ONLY:
                 loss = config.TRAINING.LOSS_MSE_C1*criterion(mse_target1, contrast1_labels)+config.TRAINING.LOSS_MSE_C2*criterion(mse_target2, contrast2_labels)
+                    
                 if args.logging:
-                    writer.add_scalar('mse_loss', loss.detach().cpu().item(), epoch * len(train_dataloader) + batch_idx)
+                    writer.add_scalar('mse_loss', loss.detach().cpu().item(), epoch * num_batches + batch_idx)
 
                 # add seg loss
                 if "Seg" in getattr(config.MODEL, "MODEL_CLASS", None):
@@ -372,10 +412,10 @@ def main(args):
                     seg_labels = seg_labels[:, 1:]
                     loss_seg = criterion_seg(seg_pred, seg_labels)
                     loss = loss + loss_seg
-
+                    
                     if args.logging:
-                        writer.add_scalar('seg_loss', loss_seg.detach().cpu().item(), epoch * len(train_dataloader) + batch_idx)
-                        writer.add_scalar('total_loss', loss.detach().cpu().item(), epoch * len(train_dataloader) + batch_idx)
+                        writer.add_scalar('seg_loss', loss_seg.detach().cpu().item(), epoch * num_batches + batch_idx)
+                        writer.add_scalar('total_loss', loss.detach().cpu().item(), epoch * num_batches + batch_idx)
             
             else:
                 loss = criterion(target_mse, labels)
@@ -394,48 +434,55 @@ def main(args):
                 cc_loss1 = cc_criterion(mi_target1.unsqueeze(0).unsqueeze(0), contrast1_labels[contrast1_segm].unsqueeze(0).unsqueeze(0))
                 cc_loss2 = cc_criterion(mi_target2.unsqueeze(0).unsqueeze(0), contrast2_labels[contrast2_segm].unsqueeze(0).unsqueeze(0))
                 loss += config.MI_CC.LOSS_CC*(cc_loss1+cc_loss2)
-                    
-                
+                                                
             # ------- optimize -------
             optimizer.zero_grad()
             loss.backward()
+            
+            # Check for NaN/Inf values in gradients
+            g_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=100.0)  # clip gradients to prevent explosion
+            
             optimizer.step()
-            loss_batch += loss.item()
-            loss_epoch += loss_batch
 
+            loss_epoch += loss.detach()
+                            
         # add total loss for the epoch
+        loss_epoch_cpu = loss_epoch.cpu().item()
         if args.logging:
-            writer.add_scalar('total_loss', loss_epoch / len(train_dataloader), epoch)
+            writer.add_scalar('total_loss', loss_epoch_cpu / num_batches, epoch)
 
         # collect epoch stats
         epoch_time = time.time() - start
         lr = optimizer. param_groups[0]["lr"]
+        # print(f'Epoch {epoch:03d}   Time:  {epoch_time:4.2f}s Loss: {loss_epoch_cpu / num_batches:6.5f}   LR: {lr:.6f}')
+        pbar.set_postfix({'Loss': f'{loss_epoch_cpu / num_batches:.5f}', 'LR': f'{lr:.6f}'})
+
         if epoch == (config.TRAINING.EPOCHS -1):
             torch.save(model.state_dict(), model_path)
         scheduler.step()
 
         ################ INFERENCE #######################
+        # Only perform inference at every 10th epoch or at the end of training
+        if ((epoch + 1) % 10 > 0) and (epoch < config.TRAINING.EPOCHS -1):
+            continue
+                
         model_inference = model
         model_inference.eval()
         start = time.time()
-
-        if epoch == 0:
-            mgrid = dataset.get_coordinates()
-            infer_data = InferDataset(mgrid)
-            mgrid_affine = dataset.get_affine()
-            x_dim, y_dim, z_dim = dataset.get_dim()
-            infer_loader = torch.utils.data.DataLoader(infer_data,
-                                                       batch_size=5000,
-                                                       shuffle=False,
-                                                       num_workers=config.SETTINGS.NUM_WORKERS)
 
         if "Seg" in getattr(config.MODEL, "MODEL_CLASS", None):
             out = np.zeros((int(x_dim*y_dim*z_dim), (2+seg_label_num)))  # add the label column
         else:
             out = np.zeros((int(x_dim*y_dim*z_dim), 2))
         model_inference.to(device)
-        for batch_idx, (data) in enumerate(infer_loader):
 
+        inference_batch_size = 5000
+        num_batches = int(np.ceil(mgrid.shape[0] / inference_batch_size))
+        for batch_idx in range(num_batches):
+            batch_start = batch_idx * inference_batch_size
+            batch_end = min((batch_idx + 1) * inference_batch_size, mgrid.shape[0])
+            data = mgrid[batch_start:batch_end,:]
+            
             if torch.cuda.is_available():
                 data = data.to(device)
                 
@@ -451,7 +498,7 @@ def main(args):
             if config.MODEL.USE_SIREN or config.MODEL.USE_WIRE_REAL:
                 output, _ = output
 
-            out[batch_idx*5000:(batch_idx*5000 + len(output)),:] = output.cpu().detach().numpy() 
+            out[batch_start:batch_end,:] = output.cpu().detach().numpy() 
 
         model_intensities=out
 
@@ -471,7 +518,7 @@ def main(args):
 
             inference_time = time.time() - start
 
-            print("Generating NIFTIs.")
+            # print("Generating NIFTIs.")
             img_contrast1 = model_intensities_contrast1.reshape((x_dim, y_dim, z_dim))#.cpu().numpy()
             img_contrast2 = model_intensities_contrast2.reshape((x_dim, y_dim, z_dim))#.cpu().numpy()
 
